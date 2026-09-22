@@ -1,0 +1,32 @@
+# orders :: STAGING
+#
+# Same chart, same service, different environment.
+# Compare against orders-prod.yaml — only 4 things differ:
+#   fewer replicas, smaller resources, no PDB, different banner.
+#
+# Every probe, label, rollout strategy, preStop hook and selector is
+# IDENTICAL to production, because they come from the shared chart.
+# That is the real value: staging genuinely behaves like prod.
+
+nameOverride: orders
+
+replicaCount: 1
+
+image:
+  tag: "6.7.1"
+
+resources:
+  requests:
+    cpu: 25m
+    memory: 32Mi
+  limits:
+    cpu: 100m
+    memory: 96Mi
+
+# One replica cannot satisfy a PDB, and staging does not need one.
+podDisruptionBudget:
+  enabled: false
+
+config:
+  PODINFO_UI_COLOR: "#8957e5"
+  PODINFO_UI_MESSAGE: "orders :: STAGING"

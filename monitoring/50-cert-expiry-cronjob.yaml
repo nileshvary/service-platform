@@ -1,0 +1,230 @@
+# ============================================================================
+# Certificate expiry CronJob — the "Python and CronJob checks" in bullet 3.
+#
+# WHY IT EXISTS ALONGSIDE BLACKBOX
+#   Blackbox already reports probe_ssl_earliest_cert_expiry for anything it
+#   probes over HTTPS. This covers the gaps Blackbox cannot:
+#     - non-HTTP TLS services: LDAPS, SMTPS, a Postgres port, mTLS gRPC
+#     - CLIENT certificates your services PRESENT to partners — nothing
+#       probes those from outside
+#     - appliances and load balancers not in the probe list
+#
+# WHY PUSHGATEWAY
+#   This is a batch job: it runs, reports, exits. Prometheus scrapes things
+#   that stay up, so there is nothing to scrape. The job pushes; Prometheus
+#   scrapes Pushgateway.
+#
+# ZERO DEPENDENCIES
+#   Python standard library only — no pip install at container start, so no
+#   network dependency and a fast, reliable job.
+# ============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: certcheck-script
+  namespace: monitoring
+data:
+  certcheck.py: |
+    #!/usr/bin/env python3
+    """TLS certificate expiry checker. Pushes results to Pushgateway."""
+
+    import datetime
+    import os
+    import socket
+    import ssl
+    import sys
+    import urllib.error
+    import urllib.request
+    from concurrent.futures import ThreadPoolExecutor
+
+    PUSHGATEWAY = os.environ.get("PUSHGATEWAY_URL", "http://pushgateway:9091")
+    TIMEOUT = float(os.environ.get("TIMEOUT_SECONDS", "10"))
+    WORKERS = int(os.environ.get("WORKERS", "10"))
+
+
+    def parse_target(raw):
+        """'example.com:443' or 'example.com' -> ('example.com', 443)."""
+        raw = raw.strip()
+        if not raw or raw.startswith("#"):
+            return None
+        if ":" in raw:
+            host, _, port = raw.rpartition(":")
+            return host, int(port)
+        return raw, 443
+
+
+    def days_until_expiry(host, port):
+        """
+        Returns (days_remaining, valid_flag).
+
+        THE CASE THAT MATTERS MOST: an expired certificate raises during the
+        TLS handshake under normal verification. Naive scripts crash here.
+        We catch it and report 0 days / valid=0 -- the failure IS the answer.
+        """
+        ctx = ssl.create_default_context()
+        try:
+            with socket.create_connection((host, port), timeout=TIMEOUT) as sock:
+                with ctx.wrap_socket(sock, server_hostname=host) as tls:
+                    cert = tls.getpeercert()
+            # notAfter looks like: 'Jun  1 12:00:00 2027 GMT'
+            expires = datetime.datetime.strptime(
+                cert["notAfter"], "%b %d %H:%M:%S %Y %Z"
+            ).replace(tzinfo=datetime.timezone.utc)
+            now = datetime.datetime.now(datetime.timezone.utc)
+            return (expires - now).total_seconds() / 86400.0, 1
+
+        except ssl.SSLCertVerificationError as exc:
+            # Expired, self-signed, wrong hostname, or untrusted CA.
+            # All mean "a normal client cannot use this" -> 0 days, invalid.
+            print("  {}:{} VERIFY FAILED: {}".format(host, port, exc.verify_message),
+                  file=sys.stderr)
+            return 0.0, 0
+
+        except (socket.timeout, socket.gaierror, ConnectionError, OSError) as exc:
+            # Unreachable is NOT the same as a bad certificate. Return None
+            # so we skip it rather than reporting a fake 0 that would look
+            # like an expiry emergency.
+            print("  {}:{} UNREACHABLE: {}".format(host, port, exc), file=sys.stderr)
+            return None, None
+
+
+    def push(lines):
+        """
+        PUT the metrics to Pushgateway.
+
+        PUT vs POST -- a real interview question:
+          POST replaces only the metric names in this payload
+          PUT  replaces the ENTIRE group
+        PUT is correct: remove a host from the target list and its old
+        metric disappears instead of alerting forever on a host nobody
+        monitors any more.
+        """
+        url = "{}/metrics/job/certcheck".format(PUSHGATEWAY)
+        body = ("\n".join(lines) + "\n").encode()
+        req = urllib.request.Request(url, data=body, method="PUT")
+        req.add_header("Content-Type", "text/plain")
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            return resp.status
+
+
+    def main():
+        raw = os.environ.get("TARGETS", "")
+        targets = [t for t in (parse_target(x) for x in raw.split(",")) if t]
+        if not targets:
+            print("No TARGETS set", file=sys.stderr)
+            return 1
+
+        print("Checking {} endpoints...".format(len(targets)))
+
+        lines = [
+            "# HELP cert_expiry_days Days until the TLS certificate expires.",
+            "# TYPE cert_expiry_days gauge",
+            "# HELP cert_valid Whether the certificate chain verified.",
+            "# TYPE cert_valid gauge",
+        ]
+
+        # BOUNDED concurrency. 100 endpoints sequentially at a 10s timeout is
+        # 16 minutes worst case; 10 at a time makes it under 2. Bounded and
+        # not unlimited -- 100 simultaneous TLS handshakes is its own problem.
+        with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+            results = list(pool.map(lambda t: (t, days_until_expiry(*t)), targets))
+
+        checked = 0
+        for (host, port), (days, valid) in results:
+            if days is None:
+                continue
+            checked += 1
+            label = '{{host="{}",port="{}"}}'.format(host, port)
+            lines.append("cert_expiry_days{} {:.2f}".format(label, days))
+            lines.append("cert_valid{} {}".format(label, valid))
+            print("  {} {}:{} -> {:.1f} days".format(
+                "OK " if valid else "BAD", host, port, days))
+
+        # The job reports on ITSELF too. Without this, a job that stops
+        # running leaves stale expiry values that look reassuring forever.
+        lines += [
+            "# HELP certcheck_last_success_timestamp_seconds When the job last completed.",
+            "# TYPE certcheck_last_success_timestamp_seconds gauge",
+            "certcheck_last_success_timestamp_seconds {}".format(
+                int(datetime.datetime.now().timestamp())),
+            "# HELP certcheck_endpoints_checked Endpoints successfully reached.",
+            "# TYPE certcheck_endpoints_checked gauge",
+            "certcheck_endpoints_checked {}".format(checked),
+        ]
+
+        try:
+            status = push(lines)
+            print("Pushed {} endpoints to Pushgateway (HTTP {})".format(checked, status))
+        except urllib.error.URLError as exc:
+            print("Push FAILED: {}".format(exc), file=sys.stderr)
+            return 1
+        return 0
+
+
+    if __name__ == "__main__":
+        sys.exit(main())
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: certcheck
+  namespace: monitoring
+spec:
+  # Every 10 minutes for the lab. In production: once or twice a day --
+  # certificates do not change minute to minute, and hammering partner
+  # endpoints with TLS handshakes is rude.
+  schedule: "*/10 * * * *"
+
+  # Keep history so you can see what previous runs reported.
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+
+  # If a run is still going when the next is due, skip rather than pile up.
+  concurrencyPolicy: Forbid
+
+  # If the scheduler was down and missed the window, do not fire a backlog.
+  startingDeadlineSeconds: 300
+
+  jobTemplate:
+    spec:
+      # Two attempts, then give up. CertCheckJobStale will catch it.
+      backoffLimit: 2
+      # Hard stop so a hung job cannot run forever.
+      activeDeadlineSeconds: 300
+      ttlSecondsAfterFinished: 3600
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+          containers:
+            - name: certcheck
+              image: python:3.12-alpine
+              command: ["python3", "/scripts/certcheck.py"]
+              env:
+                - name: PUSHGATEWAY_URL
+                  value: "http://pushgateway:9091"
+                - name: TARGETS
+                  # Mix of good, expired, and self-signed so you can SEE
+                  # the difference in the output.
+                  value: >-
+                    www.google.com:443,
+                    kubernetes.io:443,
+                    expired.badssl.com:443,
+                    self-signed.badssl.com:443,
+                    grafana.com:443
+                - name: WORKERS
+                  value: "5"
+              resources:
+                requests: { cpu: 10m, memory: 32Mi }
+                limits:   { memory: 64Mi }
+              volumeMounts:
+                - name: script
+                  mountPath: /scripts
+                  readOnly: true
+          volumes:
+            - name: script
+              configMap:
+                name: certcheck-script

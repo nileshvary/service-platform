@@ -1,0 +1,37 @@
+{{/*
+`helm test` hook. Runs AFTER install/upgrade and verifies the Service
+actually serves traffic.
+
+Why this exists: a deploy that "succeeded" because the API server accepted
+the manifests is not a deploy that works. This hits the Service by name,
+which exercises DNS, the ClusterIP, the EndpointSlice and the pod — the
+whole path a caller uses. A selector mismatch fails here instead of in
+production.
+
+hook-delete-policy keeps the pod on failure so you can read its logs.
+*/}}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "service.name" . }}-test-connection
+  labels:
+    {{- include "service.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: curlimages/curl:8.10.1
+      command:
+        - sh
+        - -c
+        - |
+          set -e
+          echo "resolving and calling {{ include "service.name" . }}"
+          curl --fail --max-time 10 --retry 3 --retry-delay 2 \
+            "http://{{ include "service.name" . }}:{{ .Values.service.port }}{{ .Values.probes.readiness.path }}"
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits:   { memory: 32Mi }

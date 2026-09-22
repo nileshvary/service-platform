@@ -1,0 +1,178 @@
+# ============================================================================
+# SLOs AS CODE — recording rules + multi-window multi-burn-rate alerts.
+#
+# THE SLO
+#   99.9% of requests return non-5xx, measured over 30 days.
+#   Error budget = 0.1%  =  ~43 minutes of failure per 30 days.
+#
+# WHY RECORDING RULES
+#   Prometheus pre-computes these on a schedule and stores the result. A
+#   burn-rate query over 3 days across every service would be far too slow
+#   to run live in a dashboard or an alert. Recording rules make expensive
+#   queries cheap by computing them once.
+#
+# WHY BURN RATE INSTEAD OF "SLO BREACHED"
+#   Alerting on breach is useless — by the time a 30-day SLO is breached the
+#   month is already lost. Burn rate asks: at this rate, how fast is the
+#   budget disappearing?
+#     1x    -> you exhaust the budget exactly at month end
+#     14.4x -> you burn the WHOLE month's budget in 2 days
+# ============================================================================
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: slo-rules
+  namespace: prod
+  labels:
+    release: kps
+spec:
+  groups:
+
+    # ---- RECORDING RULES: the SLI at several windows ------------------
+    # Note rate() BEFORE sum() in every one. rate() repairs counter resets
+    # when a pod restarts; summing first turns a restart into a huge
+    # negative spike.
+    - name: slo-sli-recording
+      interval: 30s
+      rules:
+
+        - record: slo:request_error_ratio:rate5m
+          expr: |
+            sum by (namespace, service) (rate(http_requests_total{status=~"5..",namespace="prod"}[5m]))
+              /
+            sum by (namespace, service) (rate(http_requests_total{namespace="prod"}[5m]))
+
+        - record: slo:request_error_ratio:rate30m
+          expr: |
+            sum by (namespace, service) (rate(http_requests_total{status=~"5..",namespace="prod"}[30m]))
+              /
+            sum by (namespace, service) (rate(http_requests_total{namespace="prod"}[30m]))
+
+        - record: slo:request_error_ratio:rate1h
+          expr: |
+            sum by (namespace, service) (rate(http_requests_total{status=~"5..",namespace="prod"}[1h]))
+              /
+            sum by (namespace, service) (rate(http_requests_total{namespace="prod"}[1h]))
+
+        - record: slo:request_error_ratio:rate6h
+          expr: |
+            sum by (namespace, service) (rate(http_requests_total{status=~"5..",namespace="prod"}[6h]))
+              /
+            sum by (namespace, service) (rate(http_requests_total{namespace="prod"}[6h]))
+
+        # The headline number for a dashboard: availability over 30 days.
+        - record: slo:availability:ratio30d
+          expr: |
+            1 - (
+              sum by (namespace, service) (increase(http_requests_total{status=~"5..",namespace="prod"}[30d]))
+                /
+              sum by (namespace, service) (increase(http_requests_total{namespace="prod"}[30d]))
+            )
+
+        # Error budget REMAINING, as a fraction of the budget.
+        # 1.0 = untouched. 0 = exhausted. Negative = SLO breached.
+        # This is the number you put on a wall and show product.
+        - record: slo:error_budget_remaining:ratio30d
+          expr: |
+            1 - (
+              (
+                sum by (namespace, service) (increase(http_requests_total{status=~"5..",namespace="prod"}[30d]))
+                  /
+                sum by (namespace, service) (increase(http_requests_total{namespace="prod"}[30d]))
+              ) / 0.001
+            )
+
+    # ---- BURN-RATE ALERTS --------------------------------------------
+    # Each alert uses TWO windows:
+    #   the LONG window detects the burn
+    #   the SHORT window confirms it is STILL happening
+    # Without the short window the alert keeps firing for hours after
+    # recovery, because the long window still contains the bad period.
+    - name: slo-burn-rate
+      interval: 30s
+      rules:
+
+        - alert: SLOBurnRateCritical
+          # 14.4x: the entire 30-day budget gone in 2 days.
+          # 0.001 * 14.4 = 0.0144 = a 1.44% error rate.
+          expr: |
+            slo:request_error_ratio:rate1h  > (14.4 * 0.001)
+              and
+            slo:request_error_ratio:rate5m  > (14.4 * 0.001)
+          labels:
+            severity: critical
+            slo: availability
+          annotations:
+            summary: "{{ $labels.service }} burning error budget 14.4x — PAGE"
+            description: "At this rate the entire 30-day budget is gone in 2 days. Current 1h error ratio {{ $value | humanizePercentage }}."
+            runbook_url: "https://runbooks.internal/slo-burn"
+
+        - alert: SLOBurnRateHigh
+          # 6x: budget gone in 5 days. Still a page, less frantic.
+          expr: |
+            slo:request_error_ratio:rate6h  > (6 * 0.001)
+              and
+            slo:request_error_ratio:rate30m > (6 * 0.001)
+          labels:
+            severity: critical
+            slo: availability
+          annotations:
+            summary: "{{ $labels.service }} burning error budget 6x"
+            description: "Budget exhausted in ~5 days at this rate."
+
+        - alert: SLOBurnRateMedium
+          # 3x: a ticket, not a page. Someone looks at it tomorrow.
+          expr: |
+            slo:request_error_ratio:rate6h > (3 * 0.001)
+          for: 1h
+          labels:
+            severity: warning
+            slo: availability
+          annotations:
+            summary: "{{ $labels.service }} burning error budget 3x"
+
+        - alert: SLOErrorBudgetExhausted
+          # The consequence, not just the measurement. This is the alert
+          # that triggers the feature freeze conversation.
+          expr: slo:error_budget_remaining:ratio30d < 0
+          for: 10m
+          labels:
+            severity: critical
+            slo: availability
+          annotations:
+            summary: "{{ $labels.service }} has EXHAUSTED its 30-day error budget"
+            description: "SLO breached. Per policy: reliability work only until the budget recovers."
+
+    # ---- LATENCY SLO --------------------------------------------------
+    # PERCENTILES, NEVER AVERAGES.
+    # 99 requests at 10ms and one at 10s averages to 110ms — looks fine,
+    # and one user had a terrible experience. Averages hide the tail.
+    - name: slo-latency
+      interval: 30s
+      rules:
+
+        - record: slo:latency_p99:5m
+          expr: |
+            histogram_quantile(0.99,
+              sum by (namespace, service, le) (rate(http_request_duration_seconds_bucket{namespace="prod"}[5m]))
+            )
+
+        # The proportion of requests FASTER than the threshold. This is the
+        # correct SLI shape for latency: a ratio you can budget, not a
+        # percentile you eyeball.
+        - record: slo:latency_sli:ratio5m
+          expr: |
+            sum by (namespace, service) (rate(http_request_duration_seconds_bucket{le="0.5",namespace="prod"}[5m]))
+              /
+            sum by (namespace, service) (rate(http_request_duration_seconds_count{namespace="prod"}[5m]))
+
+        - alert: LatencySLOBurn
+          # SLO: 99% of requests under 500ms. Alert when under 97%.
+          expr: slo:latency_sli:ratio5m < 0.97
+          for: 15m
+          labels:
+            severity: warning
+            slo: latency
+          annotations:
+            summary: "{{ $labels.service }} latency SLO burning"
+            description: "Only {{ $value | humanizePercentage }} of requests under 500ms (target 99%)."

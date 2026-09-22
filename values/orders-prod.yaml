@@ -1,0 +1,30 @@
+# orders :: PRODUCTION
+#
+# This is the entire per-service, per-environment config. ~20 lines.
+# Everything else comes from the shared chart's defaults.
+#
+# THIS is what "standardized chart templates adopted across dev, staging
+# and production for 25+ services" actually looks like in a repo.
+
+nameOverride: orders
+
+replicaCount: 3
+
+image:
+  tag: "6.7.1"          # pinned. never "latest" — unrollbackable, unreproducible
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+config:
+  PODINFO_UI_COLOR: "#1f6feb"
+  PODINFO_UI_MESSAGE: "orders :: PROD"

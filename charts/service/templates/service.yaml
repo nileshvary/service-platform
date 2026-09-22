@@ -1,0 +1,19 @@
+{{/*
+Note the Service selector uses the SAME helper as the Deployment's pod labels.
+That is the structural fix for the outage you debugged: with Helm they cannot
+drift apart, because they are generated from one definition.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "service.name" . }}
+  labels:
+    {{- include "service.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "service.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http

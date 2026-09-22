@@ -1,0 +1,42 @@
+{{/*
+ServiceMonitor — the Prometheus Operator's whole point.
+
+WITHOUT the Operator: to scrape a new service you edit a central
+prometheus.yml, add a job, and reload Prometheus. One team, one file,
+one bottleneck. At 25 services that is a queue.
+
+WITH the Operator: each service ships this object alongside its own
+Deployment. The Operator watches for ServiceMonitors, regenerates
+Prometheus's config, and reloads it. Teams onboard themselves.
+
+That is what "using the Prometheus Operator" means in your resume bullet.
+*/}}
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "service.name" . }}
+  labels:
+    {{- include "service.labels" . | nindent 4 }}
+spec:
+  {{/*
+    selector picks which SERVICE to scrape — not which pods.
+    Prometheus reads that Service's EndpointSlice to find the pod IPs,
+    then scrapes each pod directly. It does NOT go through the ClusterIP,
+    because load-balancing across pods would give you a random pod's
+    metrics each time instead of every pod's.
+  */}}
+  selector:
+    matchLabels:
+      {{- include "service.selectorLabels" . | nindent 6 }}
+
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+
+  endpoints:
+    - port: http                      # the Service PORT NAME, not a number
+      path: {{ .Values.serviceMonitor.path }}
+      interval: {{ .Values.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
+{{- end }}

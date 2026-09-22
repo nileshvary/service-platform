@@ -1,0 +1,87 @@
+# DEFAULT values. Every service inherits these unless its own values file
+# overrides them.
+#
+# The layering is the whole point:
+#   values.yaml                  <- sane defaults for everyone (this file)
+#   values/<service>-<env>.yaml  <- only what differs
+#
+# A service's values file is ~15 lines. Without Helm it would be 5 full
+# YAML manifests, per service, per environment.
+
+# Name of the service. Used for the Deployment, Service, ConfigMap and labels.
+# Always set this in the per-service values file.
+nameOverride: ""
+
+replicaCount: 2
+
+image:
+  repository: stefanprodan/podinfo
+  tag: ""                 # empty -> falls back to Chart.yaml appVersion
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+
+containerPort: 9898
+
+# Requests = what the scheduler reserves. Limits = what the kernel enforces.
+# Defaults are deliberately small; prod overrides them upward.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+# Probes. Note timeoutSeconds is set EXPLICITLY — the default is 1s, which
+# is brutally short for an app under load and causes phantom restarts.
+probes:
+  startup:
+    path: /healthz
+    periodSeconds: 2
+    failureThreshold: 15     # 30s budget to boot
+    timeoutSeconds: 2
+  liveness:
+    path: /healthz           # process only. NEVER a dependency check.
+    periodSeconds: 10
+    failureThreshold: 3      # 30s wedged before restart
+    timeoutSeconds: 2
+  readiness:
+    path: /readyz            # may check dependencies; only de-routes traffic
+    periodSeconds: 5
+    failureThreshold: 2      # 10s before traffic is pulled
+    timeoutSeconds: 2
+
+# Zero-downtime rollout: never drop below the desired replica count.
+rollout:
+  maxSurge: 1
+  maxUnavailable: 0
+
+# Drain connections before SIGTERM reaches the app. Without this you get
+# 502s on every deploy even with maxUnavailable: 0, because endpoint removal
+# and pod termination race each other.
+terminationGracePeriodSeconds: 30
+preStopSleepSeconds: 5
+
+# Non-secret app config -> rendered into a ConfigMap.
+config:
+  PODINFO_UI_COLOR: "#34577c"
+  PODINFO_UI_MESSAGE: "hello"
+
+# Protects against VOLUNTARY disruption (node drain, cluster upgrade).
+# Does NOT protect against a node crashing — that is involuntary.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Turned on in Day 2 when Prometheus Operator is installed.
+
+# --- Prometheus scraping ----------------------------------------------------
+# Enabled per service. A batch job with no HTTP endpoint would leave this off.
+serviceMonitor:
+  enabled: true
+  path: /metrics
+  interval: 30s
+  scrapeTimeout: 10s

@@ -1,0 +1,80 @@
+# ============================================================================
+# STEP 3 of 3 — LEAST-PRIVILEGE SERVICE-TO-SERVICE
+#
+# The business rule: orders may call payments and shipments.
+# Nothing else may call them. Nothing may call orders from inside the mesh.
+#
+# CRITICAL: NetworkPolicy requires BOTH SIDES to agree.
+#   - orders needs an EGRESS rule permitting it to leave
+#   - payments needs an INGRESS rule permitting orders to arrive
+# Miss either one and the traffic is dropped. This is the difference from a
+# stateless ACL where one permit on one interface is enough.
+#
+# NetworkPolicies ARE stateful: return traffic on an established connection
+# is allowed automatically. You do not write a reverse rule for replies.
+# ============================================================================
+
+# --- orders may egress to payments and shipments on port 9898 -----------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orders-egress-to-backends
+  namespace: prod
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: orders
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: payments
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: shipments
+      ports:
+        - protocol: TCP
+          port: 9898
+
+---
+# --- payments accepts ingress ONLY from orders --------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: payments-ingress-from-orders
+  namespace: prod
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: payments
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: orders
+      ports:
+        - protocol: TCP
+          port: 9898
+
+---
+# --- shipments accepts ingress ONLY from orders -------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: shipments-ingress-from-orders
+  namespace: prod
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: shipments
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: orders
+      ports:
+        - protocol: TCP
+          port: 9898

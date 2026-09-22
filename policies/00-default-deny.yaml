@@ -1,0 +1,26 @@
+# ============================================================================
+# STEP 1 of 3 — DEFAULT DENY
+#
+# This is the "implicit deny at the bottom of the ACL". One per namespace.
+# podSelector: {} means EVERY pod. No rules means NOTHING is allowed.
+#
+# On its own this breaks everything, including DNS. That is intentional and
+# correct: you start from zero and add back only what is needed.
+# ============================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: prod
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: staging
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]

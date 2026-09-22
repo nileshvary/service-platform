@@ -1,0 +1,135 @@
+# ============================================================================
+# Probe — the Prometheus Operator CRD for black-box targets.
+#
+# Same self-service pattern as ServiceMonitor. You declare WHAT to probe and
+# WHICH prober to use; the Operator generates the scrape config with the
+# relabeling that makes the metric look like it came from the target rather
+# than from Blackbox.
+#
+# THE ARCHITECTURE POINT (expect to be asked):
+#   Prometheus does NOT scrape the target. It scrapes Blackbox at
+#   /probe?target=<x>&module=<y>, and relabeling rewrites `instance` to <x>.
+#   That is why one Blackbox pod covers 100+ endpoints.
+# ============================================================================
+
+# --- EXTERNAL endpoints: availability, latency, DNS and TLS ---------------
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: external-https
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  jobName: blackbox-external
+  interval: 60s
+  module: http_2xx
+  prober:
+    url: blackbox:9115
+  targets:
+    staticConfig:
+      static:
+        - https://www.google.com
+        - https://kubernetes.io
+        - https://grafana.com
+      labels:
+        tier: external
+
+---
+# --- A DELIBERATELY EXPIRED CERT -----------------------------------------
+# badssl.com publishes endpoints with broken TLS on purpose. Using the
+# insecure module means the probe still SUCCEEDS at the HTTP level, so we
+# get a real probe_ssl_earliest_cert_expiry value in the past — which is
+# what makes the expiry alert actually fire.
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: tls-test-cases
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  jobName: blackbox-tls-test
+  interval: 60s
+  module: http_2xx_insecure
+  prober:
+    url: blackbox:9115
+  targets:
+    staticConfig:
+      static:
+        - https://expired.badssl.com
+        - https://self-signed.badssl.com
+      labels:
+        tier: tls-test
+
+---
+# --- INTERNAL services: probe them the way a CLIENT sees them ------------
+# White-box metrics come from the app itself. This is the outside view: if
+# the pod is wedged, white-box metrics just STOP (silence, which looks like
+# a quiet night) while probe_success keeps reporting 0 (a signal).
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: internal-services
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  jobName: blackbox-internal
+  interval: 30s
+  module: http_2xx
+  prober:
+    url: blackbox:9115
+  targets:
+    staticConfig:
+      static:
+        - http://orders.prod.svc.cluster.local/
+        - http://payments.prod.svc.cluster.local/
+        - http://shipments.prod.svc.cluster.local/
+      labels:
+        tier: internal
+
+---
+# --- TCP reachability: the non-HTTP case ---------------------------------
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: internal-tcp
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  jobName: blackbox-tcp
+  interval: 60s
+  module: tcp_connect
+  prober:
+    url: blackbox:9115
+  targets:
+    staticConfig:
+      static:
+        - orders.prod.svc.cluster.local:80
+        - kube-dns.kube-system.svc.cluster.local:53
+      labels:
+        tier: internal-tcp
+
+---
+# --- DNS health ----------------------------------------------------------
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: dns-health
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  jobName: blackbox-dns
+  interval: 60s
+  module: dns_udp
+  prober:
+    url: blackbox:9115
+  targets:
+    staticConfig:
+      static:
+        - kube-dns.kube-system.svc.cluster.local:53
+      labels:
+        tier: dns

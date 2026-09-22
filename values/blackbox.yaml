@@ -1,0 +1,47 @@
+# Blackbox exporter — probes endpoints from OUTSIDE and reports what happened.
+# ONE deployment serves 100+ targets: Prometheus scrapes BLACKBOX and passes
+# the target as a URL parameter. It is a probe service, not a per-host agent.
+fullnameOverride: blackbox
+
+resources:
+  requests: { cpu: 10m, memory: 32Mi }
+  limits:   { memory: 64Mi }
+
+config:
+  modules:
+    # --- availability + latency + TLS, all from one HTTP probe -----------
+    http_2xx:
+      prober: http
+      timeout: 5s
+      http:
+        valid_http_versions: ["HTTP/1.1", "HTTP/2.0"]
+        valid_status_codes: []          # empty = any 2xx counts as success
+        follow_redirects: true
+        preferred_ip_protocol: ip4
+        ip_protocol_fallback: false
+
+    # Same, but do NOT fail on a bad certificate — so we can still MEASURE
+    # an expired cert instead of just getting probe_success=0.
+    http_2xx_insecure:
+      prober: http
+      timeout: 5s
+      http:
+        preferred_ip_protocol: ip4
+        tls_config:
+          insecure_skip_verify: true
+
+    # --- just open the socket: databases, LDAP, SMTP, anything non-HTTP --
+    tcp_connect:
+      prober: tcp
+      timeout: 5s
+      tcp:
+        preferred_ip_protocol: ip4
+
+    # --- DNS health: is the resolver answering, and how fast -------------
+    dns_udp:
+      prober: dns
+      timeout: 5s
+      dns:
+        query_name: "kubernetes.default.svc.cluster.local"
+        query_type: "A"
+        preferred_ip_protocol: ip4

@@ -1,0 +1,24 @@
+# The standardized chart every service shares.
+#
+# This is resume bullet 1 in one directory: instead of each team copying
+# 5 YAML files and drifting, every service installs THIS chart with its
+# own small values file.
+#
+# Chart.yaml is the chart's identity card.
+
+apiVersion: v2
+name: service
+description: Standard chart for HTTP services — deployment, service, config, probes, resources
+
+# "application" (a deployable thing) vs "library" (shared template helpers only).
+type: application
+
+# version      = version of THE CHART. Bump when you change the templates.
+# appVersion   = default version of the APP being deployed (overridable per service).
+#
+# Interview point: these are independent. A chart bugfix bumps `version`
+# without touching any application version. In production this chart is
+# published to a registry and each service PINS a version — otherwise one
+# chart change silently alters every service on its next deploy.
+version: 0.1.0
+appVersion: "6.7.1"

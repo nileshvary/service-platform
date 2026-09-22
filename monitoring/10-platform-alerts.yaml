@@ -1,0 +1,147 @@
+# ============================================================================
+# PrometheusRule — alerting rules as a Kubernetes object.
+#
+# Same Operator pattern as ServiceMonitor: you do not edit a central
+# rules file. You ship a PrometheusRule CRD, the Operator notices it,
+# regenerates Prometheus's rule files and reloads. Teams own their own
+# alerts.
+#
+# THE ORGANISING PRINCIPLE: alert on SYMPTOMS, not CAUSES.
+#   symptom = users are affected   -> page someone
+#   cause   = a machine is busy    -> put it on a dashboard
+# "CPU is high" is not an incident. "Half of checkout requests are failing"
+# is. Paging on causes is how you end up with alert fatigue and people
+# ignoring the pager.
+# ============================================================================
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: platform-alerts
+  namespace: prod
+  labels:
+    release: kps
+spec:
+  groups:
+
+    # ---- SYMPTOM ALERTS: users are affected. These page. ----------------
+    - name: service-slo
+      interval: 30s
+      rules:
+
+        - alert: HighErrorRate
+          # 5xx as a fraction of all requests, per service.
+          # rate() BEFORE sum() — always. rate() repairs counter resets
+          # when a pod restarts; summing first turns a restart into a
+          # huge negative spike.
+          expr: |
+            sum by (namespace, service) (rate(http_requests_total{status=~"5..",namespace="prod"}[5m]))
+              /
+            sum by (namespace, service) (rate(http_requests_total{namespace="prod"}[5m]))
+              > 0.05
+          # 'for' is what stops flapping. The condition must hold
+          # continuously for 5 minutes. A single bad scrape does not page.
+          # It is also the main lever on MTTD: shorter = faster detection
+          # but more false pages.
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.service }} error rate above 5%"
+            description: "{{ $labels.service }} in {{ $labels.namespace }} is returning {{ $value | humanizePercentage }} 5xx over 5m."
+            runbook_url: "https://runbooks.internal/high-error-rate"
+
+        - alert: HighLatencyP99
+          # histogram_quantile over a _bucket metric. The le label is the
+          # bucket boundary; you must sum BY le or the quantile is wrong.
+          expr: |
+            histogram_quantile(0.99,
+              sum by (namespace, service, le) (rate(http_request_duration_seconds_bucket{namespace="prod"}[5m]))
+            ) > 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.service }} p99 latency above 1s"
+            description: "p99 is {{ $value | humanizeDuration }} over the last 5m."
+
+        - alert: ServiceDown
+          # Every scraped target exposes up{}. 0 means the scrape failed.
+          # This is how you find out monitoring itself broke.
+          expr: up{namespace="prod"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Prometheus cannot scrape {{ $labels.job }}"
+            description: "Target {{ $labels.instance }} has been down for 2 minutes. Check NetworkPolicy, pod health, and the metrics endpoint."
+
+    # ---- POD HEALTH: causes. These warn, they do not page. --------------
+    - name: pod-health
+      interval: 30s
+      rules:
+
+        - alert: PodCrashLooping
+          # More than 0 restarts in 15 minutes.
+          # increase() not rate() — we want a count, not a per-second rate.
+          expr: |
+            increase(kube_pod_container_status_restarts_total{namespace="prod"}[15m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.pod }} is restarting"
+            description: "{{ $labels.container }} in {{ $labels.pod }} restarted {{ $value }} times in 15m. Check for OOMKilled (exit 137 + Reason=OOMKilled) or a failing liveness probe (exit 137 + Reason=Error)."
+
+        - alert: PodNotReady
+          expr: |
+            sum by (namespace, pod) (kube_pod_status_phase{namespace="prod",phase=~"Pending|Unknown"}) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.pod }} not ready for 10m"
+            description: "Check scheduler events: insufficient CPU/memory, an unsatisfiable nodeSelector or affinity, a taint with no toleration, or a PVC that cannot bind."
+
+        - alert: DeploymentReplicasMismatch
+          # Desired vs available. This is kube-state-metrics territory:
+          # metrics about Kubernetes OBJECTS, not about machines.
+          expr: |
+            kube_deployment_spec_replicas{namespace="prod"}
+              != kube_deployment_status_replicas_available{namespace="prod"}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.deployment }} has fewer replicas than desired"
+            description: "Desired {{ $value }} but not all are available. A rollout may be stuck."
+
+        - alert: ContainerCPUThrottling
+          # THE ONLY PLACE CPU THROTTLING SHOWS UP.
+          # CPU is compressible: exceeding the limit does not kill the
+          # container, the kernel just slows it down. Your latency graph
+          # gets worse and nothing looks broken. This metric is the
+          # evidence, and it is a great interview answer.
+          expr: |
+            rate(container_cpu_cfs_throttled_seconds_total{namespace="prod",container!=""}[5m]) > 0.5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.pod }} is being CPU throttled"
+            description: "Throttled {{ $value }}s per second. The CPU limit is too low for the load — raise the limit or reduce the work."
+
+        - alert: ContainerMemoryNearLimit
+          # Memory is INCOMPRESSIBLE: exceed the limit and the kernel
+          # kills the process (OOMKilled, exit 137). This alert fires
+          # BEFORE that happens, which is the whole point.
+          expr: |
+            container_memory_working_set_bytes{namespace="prod",container!=""}
+              / on (namespace, pod, container)
+            kube_pod_container_resource_limits{namespace="prod",resource="memory"}
+              > 0.9
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.pod }} above 90% of its memory limit"
+            description: "At {{ $value | humanizePercentage }} of limit. Memory is incompressible — the next step is an OOMKill."

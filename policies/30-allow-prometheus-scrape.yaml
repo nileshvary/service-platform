@@ -1,0 +1,56 @@
+# ============================================================================
+# ALLOW PROMETHEUS TO SCRAPE
+#
+# THE PROBLEM
+# Default-deny in prod blocked everything inbound. Prometheus lives in the
+# monitoring namespace, so every scrape timed out ("context deadline
+# exceeded") and all 7 targets went DOWN.
+#
+# This is the classic default-deny casualty. Application traffic keeps
+# working because you wrote allows for it — but monitoring silently dies,
+# dashboards go blank, and alerts stop firing. You lose visibility at exactly
+# the moment you tightened security.
+#
+# THE FIX
+# One ingress rule per namespace permitting the monitoring namespace to reach
+# the metrics port. Note it is scoped to port 9898 only — monitoring gets to
+# scrape metrics, not to reach anything else.
+#
+# INTERVIEW POINT
+# "When you roll out default-deny, the two allows you write before anything
+#  else are DNS egress and Prometheus scrape ingress. Otherwise you break
+#  name resolution and you go blind."
+# ============================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+  namespace: prod
+spec:
+  podSelector: {}                 # every pod in prod
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9898              # the POD port, post-DNAT
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+  namespace: staging
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9898

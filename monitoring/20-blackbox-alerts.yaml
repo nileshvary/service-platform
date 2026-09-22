@@ -1,0 +1,113 @@
+# ============================================================================
+# Black-box alerts: availability, latency, DNS, and TIERED cert expiry.
+# ============================================================================
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: blackbox-alerts
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  groups:
+    - name: endpoint-availability
+      interval: 30s
+      rules:
+
+        - alert: EndpointDown
+          # probe_success is 0 when the probe failed for ANY reason: DNS,
+          # TCP, TLS, or a non-2xx status. It is the availability signal.
+          expr: probe_success{job=~"blackbox-.*"} == 0
+          for: 3m          # sustained. one dropped probe is not an outage.
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.instance }} unreachable"
+            description: "Probe has failed for 3 minutes. Check probe_http_status_code and the phase breakdown to find which stage failed."
+
+        - alert: EndpointSlow
+          expr: probe_duration_seconds{job=~"blackbox-.*"} > 2
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.instance }} probe taking {{ $value }}s"
+            description: "Break it down with probe_dns_lookup_time_seconds and probe_http_duration_seconds{phase=...} — 'slow' is usually one phase, not all of them."
+
+        - alert: DNSResolutionSlow
+          # This is why the phase breakdown matters. 'The API is slow' and
+          # 'DNS is slow' are different teams and different fixes.
+          expr: probe_dns_lookup_time_seconds{job=~"blackbox-.*"} > 0.5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "DNS lookup for {{ $labels.instance }} taking {{ $value }}s"
+
+    # ---- TIERED CERT EXPIRY -------------------------------------------
+    # One threshold is wrong. 30 days is a ticket during business hours.
+    # 7 days is a page. Already expired is an incident. Same metric,
+    # three different human responses.
+    - name: certificate-expiry
+      interval: 60s
+      rules:
+
+        - alert: CertExpiringIn30Days
+          expr: (probe_ssl_earliest_cert_expiry - time()) / 86400 < 30
+          for: 1h
+          labels:
+            severity: info
+          annotations:
+            summary: "{{ $labels.instance }} cert expires in {{ $value | printf \"%.0f\" }} days"
+
+        - alert: CertExpiringIn14Days
+          expr: (probe_ssl_earliest_cert_expiry - time()) / 86400 < 14
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.instance }} cert expires in {{ $value | printf \"%.0f\" }} days"
+            description: "Renewal should have happened by now. Check cert-manager: kubectl get certificate -A"
+
+        - alert: CertExpiringIn7Days
+          expr: (probe_ssl_earliest_cert_expiry - time()) / 86400 < 7
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.instance }} cert expires in {{ $value | printf \"%.0f\" }} days — PAGE"
+
+        - alert: CertAlreadyExpired
+          expr: (probe_ssl_earliest_cert_expiry - time()) < 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.instance }} certificate is EXPIRED"
+            description: "Clients are failing TLS handshakes right now."
+
+    # ---- Alerts on the CronJob's OWN metrics --------------------------
+    - name: certcheck-job
+      interval: 60s
+      rules:
+
+        - alert: CertCheckJobStale
+          # MONITOR THE MONITOR. If the CronJob stops running, expiry
+          # metrics go stale and silently stay at their last value — which
+          # looks like "everything is fine" forever. This catches that.
+          expr: time() - certcheck_last_success_timestamp_seconds > 7200
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Certificate check job has not reported in 2h"
+            description: "Stale expiry data. Check the CronJob: kubectl get cronjob -n monitoring"
+
+        - alert: CertCheckFoundInvalidCert
+          expr: cert_valid == 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.host }}:{{ $labels.port }} certificate does not verify"
+            description: "Expired, self-signed, wrong hostname, or untrusted CA."

@@ -1,0 +1,22 @@
+# Pushgateway — holds metrics from SHORT-LIVED jobs.
+#
+# Prometheus scrapes things that stay up. A CronJob runs, reports, exits —
+# there is nothing left to scrape. So the job PUSHES here, and Prometheus
+# scrapes Pushgateway instead.
+#
+# Interview: this is the documented exception for service-level batch jobs.
+# It is WRONG for ordinary services — it breaks `up`, it is a single point
+# of failure, and stale metrics linger until deleted.
+fullnameOverride: pushgateway
+
+resources:
+  requests: { cpu: 10m, memory: 32Mi }
+  limits:   { memory: 64Mi }
+
+serviceMonitor:
+  enabled: true
+  namespace: monitoring
+  # honorLabels matters: without it Prometheus overwrites the job's own
+  # job/instance labels with Pushgateway's, and you lose which host the
+  # metric was about.
+  honorLabels: true

@@ -1,0 +1,33 @@
+# shipments :: PRODUCTION
+#
+# A THIRD service. Note how little there is here.
+#
+# Three services from one chart teaches exactly what twenty-five teaches.
+# Adding service number 26 is one more file like this one — not five more
+# YAML manifests to keep in sync by hand.
+#
+# Smaller footprint than orders and payments: not every service carries the
+# same load, and that is precisely what the values file is for.
+
+nameOverride: shipments
+
+replicaCount: 2
+
+image:
+  tag: "6.7.1"
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 192Mi
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+config:
+  PODINFO_UI_COLOR: "#238636"
+  PODINFO_UI_MESSAGE: "shipments :: PROD"

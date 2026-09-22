@@ -1,0 +1,11 @@
+# The chart and the policy model are platform-owned. Changes here reach every
+# service, so they require platform review regardless of who opens the PR.
+
+/charts/                @platform-team
+/policies/              @platform-team
+/monitoring/            @platform-team
+/.github/workflows/     @platform-team
+/docs/DECISIONS.md      @platform-team
+
+# Values files are service-owned. Teams change their own and nobody else's.
+/values/                @platform-team

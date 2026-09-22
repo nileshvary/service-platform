@@ -1,0 +1,120 @@
+# ============================================================================
+# kube-prometheus-stack — tuned for an 8 GB laptop.
+#
+# The defaults assume a real cluster with real nodes. Everything here is a
+# deliberate reduction, and each one is worth being able to explain.
+# ============================================================================
+
+# --- Prometheus itself ------------------------------------------------------
+prometheus:
+  prometheusSpec:
+
+    # 6 hours instead of 10 days. Retention is the main driver of Prometheus
+    # memory and disk. In production you keep ~15d local and push older data
+    # to remote storage (Thanos / Mimir / Cortex) rather than growing one box.
+    retention: 6h
+
+    # No PersistentVolume. Data lives in the pod and dies with it — fine for a
+    # lab, never for production, where you want a PVC so a pod restart does
+    # not lose your metrics history.
+    storageSpec: {}
+
+    resources:
+      requests:
+        cpu: 100m
+        memory: 400Mi
+      limits:
+        memory: 900Mi
+
+    # CRITICAL SETTING, and a classic gotcha.
+    # By default the Operator only picks up ServiceMonitors carrying the
+    # release label. Setting these to false makes it watch EVERY
+    # ServiceMonitor in the cluster.
+    # Interview answer: "my ServiceMonitor exists but Prometheus ignores it"
+    # is almost always this label selector.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+
+    # Scrape every 30s instead of 15s — half the samples, half the memory.
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+
+# --- Alertmanager -----------------------------------------------------------
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 64Mi
+      limits:
+        memory: 128Mi
+
+# --- Grafana ----------------------------------------------------------------
+grafana:
+  adminPassword: admin          # lab only. In production this comes from a Secret.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 192Mi
+    limits:
+      memory: 512Mi
+  persistence:
+    enabled: false              # dashboards live in code, not in the pod
+
+  # ------------------------------------------------------------------------
+  # PROBE TUNING — the fix for the crash loop we hit.
+  #
+  # Grafana's chart ships an impatient liveness probe. On a loaded laptop
+  # Grafana needs longer than that to come up, so the kubelet killed it
+  # mid-startup (SIGKILL, exit 137, Reason=Error) and it restarted forever.
+  #
+  # Ideally you'd add a startupProbe, which suppresses liveness/readiness
+  # until the app is up. The upstream Grafana chart does not expose one, so
+  # we widen the liveness window instead: more failures tolerated, longer
+  # timeout, later start.
+  #
+  # Interview point: initialDelaySeconds is the OLD way. It buys startup time
+  # but ALSO delays detection of a genuine hang later, forever. startupProbe
+  # is the modern answer because it applies only once, at boot.
+  # ------------------------------------------------------------------------
+  livenessProbe:
+    httpGet:
+      path: /api/health
+      port: 3000
+    initialDelaySeconds: 120    # do not even look for 2 minutes
+    periodSeconds: 15
+    timeoutSeconds: 30          # default is 1s — far too tight under load
+    failureThreshold: 10        # 10 consecutive failures before killing
+
+  readinessProbe:
+    httpGet:
+      path: /api/health
+      port: 3000
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 10
+    failureThreshold: 30        # readiness failing is harmless: no restart
+
+# --- Exporters --------------------------------------------------------------
+kube-state-metrics:
+  resources:
+    requests: { cpu: 10m, memory: 64Mi }
+    limits:   { memory: 128Mi }
+
+prometheus-node-exporter:
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits:   { memory: 64Mi }
+
+# --- Things a managed cluster does not let you scrape anyway ----------------
+# On EKS/GKE/AKS the control plane is not yours, so these targets are always
+# down and generate noise. Turning them off here mirrors real practice.
+kubeEtcd:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false

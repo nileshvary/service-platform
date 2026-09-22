@@ -1,0 +1,21 @@
+{{/*
+The ConfigMap lives in its own file ON PURPOSE.
+
+deployment.yaml hashes THIS FILE into a pod annotation:
+    checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+
+Helm resolves templates by FILE PATH, so the path in that include must match
+this file's name exactly. Keeping one resource per file also means the hash
+covers only the config — not the Service or the PDB, which must not trigger
+a pod restart when they change.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "service.name" . }}
+  labels:
+    {{- include "service.labels" . | nindent 4 }}
+data:
+  {{- range $key, $value := .Values.config }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
