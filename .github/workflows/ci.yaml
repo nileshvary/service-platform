@@ -286,23 +286,28 @@ jobs:
       - uses: azure/setup-helm@v4
 
       - name: Render the release CI would apply
-        # CLIENT-side render. GitHub-hosted runners have no route to the
-        # cluster, so this proves one thing only: chart + values + image tag
-        # produce valid manifests for this environment.
+        # `helm template` is the ONLY genuinely offline render.
         #
-        # --dry-run=client is load-bearing, not cosmetic. Plain --dry-run
-        # still calls the API server for capabilities discovery, which is
-        # why run #2 failed with "kubernetes cluster unreachable".
+        # We tried `upgrade --install --dry-run` and then --dry-run=client,
+        # and BOTH failed with "kubernetes cluster unreachable". The reason
+        # is structural: `upgrade --install` must first ask the cluster
+        # whether the release already exists, to decide between an install
+        # and an upgrade. That lookup happens before any rendering, so no
+        # dry-run flag can skip it. --dry-run=client only skips API
+        # *capability discovery*, not the release lookup.
         #
-        # --atomic and --wait are deliberately NOT here: they describe how
-        # to wait for a real rollout, and there is nothing to wait for in a
-        # client render. Leaving them in would be cargo cult.
+        # `helm template` never contacts a cluster. It proves exactly one
+        # thing: chart + values + image tag produce valid manifests. That is
+        # all CI can honestly verify from outside the network.
         run: |
-          helm upgrade --install orders charts/service \
+          helm template orders charts/service \
             -f values/orders-prod.yaml \
             --set image.tag=${{ github.sha }} \
             --namespace prod \
-            --dry-run=client
+            > /tmp/orders-prod.yaml
+          echo "--- rendered $(grep -c '^kind:' /tmp/orders-prod.yaml) resources ---"
+          grep -E '^(kind|  name):' /tmp/orders-prod.yaml
+          grep -n 'image:' /tmp/orders-prod.yaml
 
       - name: The real deploy, for reference
         # On a cluster CI can actually reach -- EKS via the OIDC role above,
