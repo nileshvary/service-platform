@@ -285,24 +285,46 @@ jobs:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
 
-      - name: Deploy
-        # Real command, run as a dry-run because GitHub's runners cannot
-        # reach a laptop. On a cloud cluster you would drop --dry-run and
-        # authenticate with OIDC -> aws eks update-kubeconfig.
+      - name: Render the release CI would apply
+        # CLIENT-side render. GitHub-hosted runners have no route to the
+        # cluster, so this proves one thing only: chart + values + image tag
+        # produce valid manifests for this environment.
         #
-        # --atomic  : roll back automatically if the release fails
-        # --wait    : "failed" means pods did not become Ready, not just
-        #             "the API server accepted the YAML"
-        # --timeout : bound how long you wait before calling it failed
+        # --dry-run=client is load-bearing, not cosmetic. Plain --dry-run
+        # still calls the API server for capabilities discovery, which is
+        # why run #2 failed with "kubernetes cluster unreachable".
+        #
+        # --atomic and --wait are deliberately NOT here: they describe how
+        # to wait for a real rollout, and there is nothing to wait for in a
+        # client render. Leaving them in would be cargo cult.
         run: |
           helm upgrade --install orders charts/service \
             -f values/orders-prod.yaml \
             --set image.tag=${{ github.sha }} \
             --namespace prod \
-            --atomic --wait --timeout 5m \
-            --dry-run
+            --dry-run=client
+
+      - name: The real deploy, for reference
+        # On a cluster CI can actually reach -- EKS via the OIDC role above,
+        # or a self-hosted runner inside the VPC -- the command drops the
+        # dry-run and adds the flags that make "success" mean "pods are
+        # serving traffic" rather than "the API server accepted the YAML":
+        #
+        #   --wait     : wait for pods to become Ready
+        #   --timeout  : bound that wait, or a hung rollout hangs CI forever
+        #   --atomic   : roll the release back automatically if it fails
+        #                (Helm 4 renamed this to --rollback-on-failure)
+        #
+        # NOT having cluster credentials in CI is a real gap, not a lab
+        # artifact. See docs/DECISIONS.md ADR-006.
+        run: |
+          echo "helm upgrade --install orders charts/service \\"
+          echo "  -f values/orders-prod.yaml \\"
+          echo "  --set image.tag=${{ github.sha }} \\"
+          echo "  --namespace prod \\"
+          echo "  --wait --timeout 5m --atomic"
 
       - name: Post-deploy smoke test
         # A deploy that "succeeded" because Kubernetes accepted the YAML is
         # not a deploy that works. Hit a real endpoint.
-        run: echo "curl -f https://orders.internal/healthz  (dry-run)"
+        run: echo "curl -f https://orders.internal/healthz   -- not run, no cluster from CI"
