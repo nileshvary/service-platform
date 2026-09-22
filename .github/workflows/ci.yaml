@@ -188,7 +188,7 @@ jobs:
 
       # ---- 1. CONTAINER SCAN: CVEs in the base image and OS packages ----
       - name: Trivy image scan (CRITICAL fails the build)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: local/demo:${{ github.sha }}
           format: table
@@ -199,7 +199,7 @@ jobs:
       # ---- 2. Report everything else, but do NOT fail ----
       - name: Trivy full report (informational)
         if: always()
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: local/demo:${{ github.sha }}
           format: table
@@ -210,7 +210,7 @@ jobs:
       # Catches privileged containers, no resource limits, running as root,
       # hostNetwork — before they are ever applied.
       - name: Trivy config scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
           scan-ref: charts/
