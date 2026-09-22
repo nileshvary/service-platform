@@ -7,12 +7,11 @@ WORKDIR /build
 COPY requirements.txt .
 RUN pip install --no-cache-dir --target=/deps -r requirements.txt
 
-# ==== DELIBERATELY VULNERABLE - DO NOT MERGE ====
-# Alpine 3.12 ships openssl 1.1.1g and apk-tools 2.10.5, both of which have
-# CRITICAL CVEs with published fixes. The scan gate should stop this build
-# before the image is pushed to the registry.
-# Revert to `python:3.12-alpine` after the demonstration.
-FROM python:3.9.0-alpine3.12
+# The base image IS the security decision. Run #5 of this pipeline pinned
+# python:3.9.0-alpine3.12 here; Trivy found 11 CRITICAL CVEs and the scan
+# gate stopped the build before the image reached the registry.
+# Keeping the base current is the cheapest CVE reduction available.
+FROM python:3.12-alpine
 # Never run as root. A container escape from root is far worse than from
 # an unprivileged user, and many scanners flag root as a HIGH finding.
 RUN adduser -D -u 10001 appuser
